@@ -31,6 +31,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional
 
 from context import MLContextExtractor, ModelContext
+from lineage import tables_carrying_target
 
 DEFAULT_LLM = "openai/gpt-oss-120b"
 
@@ -116,6 +117,7 @@ class TemporalSpec:
     mentions_target_column: str = "no"
     # filled in by Python, not by the model
     shares_target_table: bool = False
+    reads_target_ancestor: Optional[str] = None  # "table (as column, N hop)"
 
     def key(self) -> tuple:
         """The fields whose stability we care about."""
@@ -135,7 +137,8 @@ class Decision:
 # ---------------------------------------------------------------------------
 
 
-def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM) -> List[TemporalSpec]:
+def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
+            graph=None) -> List[TemporalSpec]:
     from groq import Groq
 
     label_column = ctx.custom_properties.get("label_source_column", "(not documented)")
@@ -162,6 +165,21 @@ def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM) -> List[Tem
     )
     data = json.loads(resp.choices[0].message.content)
 
+    # Column ancestry of the label, resolved in the graph. A feature sourcing a
+    # table that carries the target column under any name is reading the label,
+    # whatever its description says.
+    ancestor_tables = {}
+    if label_table and label_column != "(not documented)":
+        label_urn = next(
+            (s.urn for f in ctx.features for s in f.sources if s.name == label_table),
+            None,
+        )
+        if label_urn and graph is not None:
+            try:
+                ancestor_tables = tables_carrying_target(graph, label_urn, label_column)
+            except Exception:  # noqa: BLE001
+                ancestor_tables = {}
+
     # Python decides table overlap; the model never sees URNs.
     sources_by_feature = {
         f.name: {s.name for s in f.sources} for f in ctx.features
@@ -180,6 +198,12 @@ def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM) -> List[Tem
         )
         if label_table:
             spec.shares_target_table = label_table in sources_by_feature.get(name, set())
+        if ancestor_tables:
+            for src_short in sources_by_feature.get(name, set()):
+                for anc_urn, (anc_col, hops) in ancestor_tables.items():
+                    if src_short and src_short in anc_urn:
+                        spec.reads_target_ancestor = f"{src_short} (as {anc_col}, {hops} hop)"
+                        break
         specs.append(spec)
     return specs
 
@@ -218,6 +242,13 @@ def decide(spec: TemporalSpec) -> Decision:
             f"description does not state: {', '.join(missing)}",
         )
 
+    if spec.reads_target_ancestor:
+        return Decision(
+            spec.feature, "gap", "reads-table-carrying-target-column",
+            f"sources {spec.reads_target_ancestor}; may read the label under "
+            f"another address regardless of what the description states",
+        )
+
     if spec.shares_target_table and spec.closes_before_scoring == "unstated":
         return Decision(
             spec.feature, "gap", "shares-target-table-no-cutoff-stated",
@@ -240,14 +271,14 @@ def verdict_for(decisions: List[Decision]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def measure(ctx: ModelContext, api_key: str, llm: str, runs: int) -> dict:
+def measure(ctx: ModelContext, api_key: str, llm: str, runs: int, graph=None) -> dict:
     """Run extraction N times and report where it disagrees with itself."""
     all_specs: List[List[TemporalSpec]] = []
     verdicts: List[str] = []
 
     for i in range(runs):
         try:
-            specs = extract(ctx, api_key, llm)
+            specs = extract(ctx, api_key, llm, graph)
         except Exception as e:  # noqa: BLE001
             print(f"  run {i+1}: FAILED ({type(e).__name__})", file=sys.stderr)
             continue
@@ -332,7 +363,7 @@ def main() -> int:
 
         if args.runs > 1:
             print(f"\n{ctx.name}: measuring {args.runs} runs", file=sys.stderr)
-            report = measure(ctx, api_key, args.llm, args.runs)
+            report = measure(ctx, api_key, args.llm, args.runs, ex.graph)
             if args.json:
                 print(json.dumps(report, indent=2))
             else:
@@ -349,7 +380,7 @@ def main() -> int:
                     print("  wobbled:   nothing -- extraction was identical every run")
             continue
 
-        specs = extract(ctx, api_key, args.llm)
+        specs = extract(ctx, api_key, args.llm, ex.graph)
         decisions = [decide(s) for s in specs]
         print(f"\nMODEL {ctx.name}")
         print(f"  verdict: {verdict_for(decisions)}")
@@ -360,6 +391,8 @@ def main() -> int:
                   f"anchor={s.anchor} closes={s.closes_before_scoring} "
                   f"target_col={s.mentions_target_column} "
                   f"same_table={s.shares_target_table}")
+            if s.reads_target_ancestor:
+                print(f"      ancestor: {s.reads_target_ancestor}")
             print(f"      rule: {d.rule}")
             if d.detail:
                 print(f"      {d.detail}")

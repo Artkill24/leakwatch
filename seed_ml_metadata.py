@@ -57,6 +57,8 @@ CUSTOMERS = snowflake("order_entry.customers")
 ORDER_ITEMS = snowflake("order_entry.order_items")
 ORDER_HISTORY = snowflake("analytics.order_history")
 PROMOTIONS = snowflake("order_entry.promotions")
+# Raw table upstream of analytics.order_history. Both carry order_status.
+ORDER_DETAILS = snowflake("analytics.order_details")
 
 # --------------------------------------------------------------------------
 # Features
@@ -104,6 +106,20 @@ FEATURES = [
             "rather than restricted to the pre-scoring window."
         ),
         "sources": [ORDER_HISTORY],
+    },
+    {
+        # Clean on a plain reading: the window is anchored and closed. The
+        # problem is only visible in the graph -- order_details is the raw
+        # table order_history was built from, and carries order_status, the
+        # column the label is defined on.
+        "name": "fulfilment_exception_rate",
+        "type": sc.MLFeatureDataTypeClass.CONTINUOUS,
+        "description": (
+            "Share of the customer's orders in the trailing 90-day window "
+            "preceding the reference date that required manual intervention "
+            "during fulfilment, computed from order detail records."
+        ),
+        "sources": [ORDER_DETAILS],
     },
 ]
 
@@ -273,32 +289,30 @@ def build_mcps():
     return mcps
 
 
-def check_datasets(gms: str) -> bool:
-    """Warn if the upstream datasets are missing; lineage would dangle."""
-    try:
-        from datahub.ingestion.graph.client import DataHubGraph, DatahubClientConfig
+def check_datasets(graph) -> bool:
+    """Warn if the upstream datasets are missing; lineage would dangle.
 
-        graph = DataHubGraph(DatahubClientConfig(server=gms))
-        missing = [
-            u
-            for u in (CUSTOMERS, ORDER_ITEMS, ORDER_HISTORY, PROMOTIONS)
-            if not graph.exists(u)
-        ]
-        if missing:
-            print("WARNING: these upstream datasets were not found:")
-            for u in missing:
-                print(f"   {u}")
-            print(
-                "\nThe datapack may not be loaded, or PREFIX is wrong.\n"
-                "Load it with:  datahub datapack load showcase-ecommerce\n"
-                "Feature lineage will dangle until they exist.\n"
-            )
-            return False
-        print(f"Upstream datasets found ({len(FEATURES)} features will attach).")
-        return True
-    except Exception as e:  # noqa: BLE001
-        print(f"Could not verify datasets ({e}); continuing anyway.")
-        return True
+    Assumes the caller has already established that the server responds. A
+    missing dataset is a warning; an absent server is not, and conflating the
+    two produced a wall of traceback for what is really a one-line problem.
+    """
+    missing = [
+        u
+        for u in (CUSTOMERS, ORDER_ITEMS, ORDER_HISTORY, PROMOTIONS, ORDER_DETAILS)
+        if not graph.exists(u)
+    ]
+    if missing:
+        print("WARNING: these upstream datasets were not found:")
+        for u in missing:
+            print(f"   {u}")
+        print(
+            "\nThe datapack may not be loaded, or PREFIX is wrong.\n"
+            "Load it with:  datahub datapack load showcase-ecommerce\n"
+            "Feature lineage will dangle until they exist.\n"
+        )
+        return False
+    print(f"Upstream datasets found ({len(FEATURES)} features will attach).")
+    return True
 
 
 def main():
@@ -318,7 +332,19 @@ def main():
         print(f"\n{len(mcps)} aspects (dry run, nothing emitted).")
         return 0
 
-    check_datasets(args.gms)
+    from datahub.ingestion.graph.client import DataHubGraph, DatahubClientConfig
+
+    try:
+        graph = DataHubGraph(DatahubClientConfig(server=args.gms, token=args.token))
+        graph.test_connection()
+    except Exception as e:  # noqa: BLE001
+        print(f"Cannot reach DataHub at {args.gms}", file=sys.stderr)
+        print(f"  {type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
+        print("\nStart it with: datahub docker quickstart --no-pull-images",
+              file=sys.stderr)
+        return 1
+
+    check_datasets(graph)
 
     emitter = DatahubRestEmitter(gms_server=args.gms, token=args.token)
     for mcp in mcps:
