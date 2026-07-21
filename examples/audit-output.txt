@@ -1,8 +1,12 @@
 MODEL customer_churn_predictor
   verdict: leakage_detected  (confidence: high)
-  2 feature(s) cross the prediction boundary stated by the label.
+  3 feature(s) cross the prediction boundary stated by the label.
 
   [!!] recency_days
+      rule: reads-target-without-cutoff
+      feature reads the label column and does not state a cutoff before scoring
+
+  [!!] avg_basket_value
       rule: reads-target-without-cutoff
       feature reads the label column and does not state a cutoff before scoring
 
