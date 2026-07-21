@@ -1,0 +1,29 @@
+MODEL customer_churn_predictor
+  verdict: leakage_detected  (confidence: high)
+  The feature post_cancellation_refund_total aggregates order totals over the entire order_history snapshot without any pre‑scoring cutoff, leaking future information into the model.
+
+  [!!] post_cancellation_refund_total
+      evidence:  computed over the full order_history snapshot rather than restricted to the pre‑scoring window
+      reasoning: The description states the aggregation uses the full snapshot, which includes orders that may occur after the scoring date, thus providing the model with information unavailable at prediction time.
+
+  documentation gaps (3)
+      recency_days: no temporal restriction on the "most recent completed order" relative to the scoring date
+        -> Without a stated cutoff, the feature could incorporate orders placed after the prediction point, which cannot be verified as safe.
+      order_frequency_90d: absence of an explicit “as_of_date” or pre‑scoring window bound for the trailing 90‑day window
+        -> Unclear whether the count includes orders occurring after the scoring date, preventing verification of leakage.
+      avg_basket_value: missing specification that the trailing 90‑day window is anchored before the scoring date
+        -> The feature might summarize future order values, but the documentation does not confirm the temporal boundary.
+
+  recommendation: Remove or redesign post_cancellation_refund_total to restrict aggregation to orders occurring before the scoring date, and update the documentation for recency_days, order_frequency_90d, and avg_basket_value to explicitly state their temporal windows relative to the prediction point. Retrain the model after fixing these issues.
+
+----------------------------------------------------------------------
+
+MODEL demand_forecast
+  verdict: clean  (confidence: high)
+  No feature metadata indicates use of information beyond the reference date, so no target leakage is detected.
+
+  recommendation: Proceed with model deployment, but maintain periodic reviews to ensure future feature additions respect the same temporal constraints.
+
+----------------------------------------------------------------------
+
+2 model(s) audited, 1 flagged.
