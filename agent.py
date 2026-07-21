@@ -38,8 +38,9 @@ from datahub.metadata.urns import TagUrn
 import datahub.metadata.schema_classes as sc
 
 from context import MLContextExtractor, ModelContext
+from temporal import extract, decide, verdict_for, Decision
 
-DEFAULT_LLM = "openai/gpt-oss-120b"
+DEFAULT_LLM = "llama-3.3-70b-versatile"
 
 TAGS = {
     "ml-leakage-risk": (
@@ -58,74 +59,10 @@ TAGS = {
     ),
 }
 
-SYSTEM_PROMPT = """\
-You are auditing a deployed machine learning model for training-data leakage, \
-working only from catalog metadata. You cannot see the data, only what the \
-catalog states about it.
-
-Target leakage occurs when a feature encodes information that would not be \
-available at the moment a prediction is made.
-
-EVIDENCE RULES. These govern every finding:
-
-1. A finding must quote the specific metadata text that establishes the \
-violation. If you cannot quote it, you do not have a finding.
-
-2. Sharing a source table with the label is not evidence. Tables routinely hold \
-both precursors and outcomes. What matters is whether a stated computation \
-crosses the prediction boundary.
-
-3. When a feature's description states a temporal restriction -- a trailing \
-window, a cutoff, a filter on events preceding the reference date -- treat that \
-statement as binding. Do not hypothesise that the implementation might violate \
-its own documentation. You are auditing what the catalog declares.
-
-4. Speculation is not a finding. If your reasoning needs "may", "could" or \
-"might" to stand up, and no quoted metadata supports it, leave it out.
-
-5. Implausibly strong training metrics corroborate a finding that already rests \
-on other evidence. Alone they prove nothing; some problems are genuinely easy.
-
-What leakage actually looks like:
-- a feature derived from an event occurring after the prediction point
-- a feature reading the field the label is defined on, without the temporal \
-restriction the label imposes
-- a feature whose stated aggregation window extends past the scoring date
-- a feature that restates the outcome rather than preceding it
-
-Where metadata is ambiguous or absent rather than wrong, that is a \
-documentation gap, not a leak. Report it under documentation_gaps. A catalog \
-that does not state its temporal boundaries cannot be audited, and saying so is \
-worth more than a guess.
-
-Set verdict to leakage_detected only if findings is non-empty. If findings is \
-empty but documentation_gaps is not, the verdict is inconclusive. If both are \
-empty, the verdict is clean.
-
-Return only JSON, no prose, no markdown fences, in exactly this shape:
-
-{
-  "verdict": "leakage_detected" | "clean" | "inconclusive",
-  "confidence": "high" | "medium" | "low",
-  "summary": "one or two sentences",
-  "findings": [
-    {
-      "feature": "feature name",
-      "severity": "critical" | "warning",
-      "evidence": "quoted metadata text establishing the violation",
-      "reasoning": "why that text implies a boundary crossing"
-    }
-  ],
-  "documentation_gaps": [
-    {
-      "subject": "feature or model name",
-      "gap": "what the metadata fails to state",
-      "why_it_matters": "what could not be verified as a result"
-    }
-  ],
-  "recommendation": "what the owning team should do next"
-}\
-"""
+# The judgement prompt that used to live here was removed. It produced verdicts
+# directly and oscillated 3/2 across identical runs; temporal.py replaced it with
+# extraction plus rules. Kept out of the file rather than commented out, so there
+# is one way to reach a verdict, not two.
 
 
 @dataclass
@@ -153,87 +90,57 @@ class AuditResult:
 # ---------------------------------------------------------------------------
 
 
-def build_evidence(ctx: ModelContext) -> dict:
-    """Reduce the context bundle to what the audit actually needs.
 
-    Dropping hyperparameters, URNs and deployment plumbing keeps the prompt
-    small and stops the model from anchoring on irrelevant detail.
-    """
-    return {
-        "model": {
-            "name": ctx.name,
-            "description": ctx.description,
-            "type": ctx.model_type,
-            "label": {
-                k: v
-                for k, v in ctx.custom_properties.items()
-                if k.startswith("label")
-            },
-            "training_window": ctx.custom_properties.get("training_window"),
-            "training_metrics": ctx.training_metrics,
-        },
-        "features": [
-            {
-                "name": f.name,
-                "description": f.description,
-                "data_type": f.data_type,
-                "sources": [
-                    {
-                        "table": s.name,
-                        "platform": s.platform,
-                        "columns": s.field_names,
-                        "column_count": s.field_count,
-                    }
-                    for s in f.sources
-                ],
-            }
-            for f in ctx.features
-        ],
-    }
-
-
-def audit(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM) -> AuditResult:
+def audit(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
+          graph=None) -> AuditResult:
+    """Extract, then apply rules. The verdict never comes from the model."""
     try:
-        from groq import Groq
+        specs = extract(ctx, api_key, llm, graph)
     except ImportError:
-        return AuditResult(
-            ctx.urn, ctx.name, "inconclusive", "low", "",
-            error="groq package not installed: pip install groq",
-        )
-
-    evidence = build_evidence(ctx)
-
-    try:
-        client = Groq(api_key=api_key)
-        resp = client.chat.completions.create(
-            model=llm,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(evidence, indent=2)},
-            ],
-            temperature=0.0,
-            response_format={"type": "json_object"},
-        )
-        raw = resp.choices[0].message.content
+        return AuditResult(ctx.urn, ctx.name, "inconclusive", "low", "",
+                           error="groq package not installed: pip install groq")
     except Exception as e:  # noqa: BLE001
         return AuditResult(ctx.urn, ctx.name, "inconclusive", "low", "",
                            error=f"{type(e).__name__}: {str(e)[:150]}")
 
-    try:
-        data = json.loads(raw.strip().removeprefix("```json").removesuffix("```"))
-    except json.JSONDecodeError:
-        return AuditResult(ctx.urn, ctx.name, "inconclusive", "low", "",
-                           error=f"model returned non-JSON: {raw[:150]}")
+    decisions = [decide(s) for s in specs]
+    violations = [d for d in decisions if d.outcome == "violation"]
+    gaps = [d for d in decisions if d.outcome == "gap"]
+
+    findings = [
+        {"feature": d.feature, "severity": "critical", "rule": d.rule,
+         "evidence": d.detail, "reasoning": d.detail}
+        for d in violations
+    ]
+    doc_gaps = [
+        {"subject": d.feature, "gap": d.rule, "why_it_matters": d.detail}
+        for d in gaps
+    ]
+
+    verdict = verdict_for(decisions)
+    if verdict == "leakage_detected":
+        summary = (f"{len(violations)} feature(s) cross the prediction boundary "
+                   f"stated by the label.")
+        rec = ("Restrict the flagged features to data available before the "
+               "scoring date, then retrain.")
+    elif verdict == "inconclusive":
+        summary = (f"No violation proven, but {len(gaps)} feature(s) lack the "
+                   f"metadata needed to verify temporal safety.")
+        rec = ("Document the anchoring and cutoff of the listed features so the "
+               "audit can reach a verdict.")
+    else:
+        summary = "All features state temporal boundaries consistent with the label."
+        rec = "No action required."
+
+    # Confidence reflects how much of the verdict rests on the graph rather than
+    # on reading prose: topological findings are identical across runs.
+    from_graph = any(s.reads_target_ancestor for s in specs)
+    confidence = "high" if (violations or from_graph) else "medium"
 
     return AuditResult(
-        model_urn=ctx.urn,
-        model_name=ctx.name,
-        verdict=data.get("verdict", "inconclusive"),
-        confidence=data.get("confidence", "low"),
-        summary=data.get("summary", ""),
-        findings=data.get("findings", []) or [],
-        documentation_gaps=data.get("documentation_gaps", []) or [],
-        recommendation=data.get("recommendation", ""),
+        model_urn=ctx.urn, model_name=ctx.name, verdict=verdict,
+        confidence=confidence, summary=summary, findings=findings,
+        documentation_gaps=doc_gaps, recommendation=rec,
     )
 
 
@@ -314,12 +221,12 @@ def render(r: AuditResult) -> str:
            f"  {r.summary}"]
     for f in r.findings:
         out.append(f"\n  {SEV_MARK.get(f.get('severity'), '[  ]')} {f.get('feature')}")
-        out.append(f"      evidence:  {f.get('evidence')}")
-        out.append(f"      reasoning: {f.get('reasoning')}")
+        out.append(f"      rule: {f.get('rule')}")
+        out.append(f"      {f.get('evidence')}")
     if r.documentation_gaps:
         out.append(f"\n  documentation gaps ({len(r.documentation_gaps)})")
         for g in r.documentation_gaps:
-            out.append(f"      {g.get('subject')}: {g.get('gap')}")
+            out.append(f"      {g.get('subject')}  [{g.get('gap')}]")
             out.append(f"        -> {g.get('why_it_matters')}")
     if r.recommendation:
         out.append(f"\n  recommendation: {r.recommendation}")
@@ -367,7 +274,7 @@ def main() -> int:
         ctx = ex.extract(urn)
         if not ctx:
             continue
-        r = audit(ctx, api_key, args.llm)
+        r = audit(ctx, api_key, args.llm, ex.graph)
         results.append(r)
         if emitter and not r.error:
             write_back(emitter, ex.graph, r)

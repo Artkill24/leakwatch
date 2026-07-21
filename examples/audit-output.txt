@@ -1,36 +1,28 @@
 MODEL customer_churn_predictor
   verdict: leakage_detected  (confidence: high)
-  The feature post_cancellation_refund_total uses the full order_history snapshot without a pre‑scoring window, leaking post‑prediction information; several other features lack documented temporal bounds, creating verification gaps.
+  2 feature(s) cross the prediction boundary stated by the label.
+
+  [!!] recency_days
+      rule: reads-target-without-cutoff
+      feature reads the label column and does not state a cutoff before scoring
 
   [!!] post_cancellation_refund_total
-      evidence:  Sum of order_total across the customer's orders whose order_status is 'cancelled', computed over the full order_history snapshot rather than restricted to the pre-scoring window.
-      reasoning: The description explicitly states the aggregation uses the full snapshot, which can include orders occurring after the scoring date, thereby encoding information unavailable at prediction time.
+      rule: reads-target-without-cutoff
+      feature reads the label column and does not state a cutoff before scoring
 
-  documentation gaps (3)
-      recency_days: No temporal restriction on the order used to compute recency
-        -> Without a bound, the feature could incorporate orders placed after the scoring date, which cannot be verified as safe.
-      order_frequency_90d: Missing statement that the trailing 90‑day window ends at the reference (scoring) date
-        -> Unclear whether the count includes future orders, preventing confirmation that the feature respects the label's prediction horizon.
-      avg_basket_value: Missing temporal boundary for the trailing 90‑day window
-        -> Cannot verify that the average is computed only on orders prior to the scoring date, risking leakage.
+  documentation gaps (1)
+      fulfilment_exception_rate  [reads-table-carrying-target-column]
+        -> sources b2fd91.order_entry_db.analytics.order_details (as order_status, 1 hop); may read the label under another address regardless of what the description states
 
-  recommendation: Restrict post_cancellation_refund_total to orders occurring before the scoring date (e.g., add a WHERE as_of_date <= reference_date clause) and update the metadata for recency_days, order_frequency_90d, and avg_basket_value to explicitly state that their windows end at the prediction/reference date.
+  recommendation: Restrict the flagged features to data available before the scoring date, then retrain.
 
 ----------------------------------------------------------------------
 
 MODEL demand_forecast
-  verdict: inconclusive  (confidence: medium)
-  No explicit leakage found, but missing temporal specifications for feature source columns create uncertainty.
+  verdict: clean  (confidence: medium)
+  All features state temporal boundaries consistent with the label.
 
-  documentation gaps (3)
-      order_frequency_90d: Feature description does not state how source columns like dispatch_date are filtered to the trailing 90‑day window
-        -> Cannot verify that only orders before the reference date are counted, risking inadvertent future data inclusion
-      avg_basket_value: No explicit temporal filter described for order_items columns used in the calculation
-        -> Unclear whether basket values are limited to the trailing 90‑day window before the reference date
-      promo_response_rate: While the description mentions a 14‑day response window closing before the reference date, it does not specify how promotion_start_date/end_date are constrained within the trailing 180‑day window
-        -> Ambiguity about whether promotions that started after the reference date could be inadvertently included
-
-  recommendation: The team should add precise temporal constraints to each feature’s definition, explicitly stating that all source events are filtered to occur before the reference date and within the stated trailing windows.
+  recommendation: No action required.
 
 ----------------------------------------------------------------------
 
