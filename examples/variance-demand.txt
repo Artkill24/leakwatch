@@ -3,7 +3,16 @@ demand_forecast: measuring 5 runs
   run 1: inconclusive
   run 2: inconclusive
   run 3: inconclusive
-  run 4: inconclusive
+Traceback (most recent call last):
+  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/groq/_base_client.py", line 1051, in request
+    response.raise_for_status()
+  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '429 Too Many Requests' for url 'https://api.groq.com/openai/v1/chat/completions'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429
+
+During handling of the above exception, another exception occurred:
+
 Traceback (most recent call last):
   File "/home/saad/datahub-agent/temporal.py", line 371, in <module>
     sys.exit(main())
@@ -23,50 +32,8 @@ Traceback (most recent call last):
   File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/groq/_base_client.py", line 1284, in post
     return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/groq/_base_client.py", line 1007, in request
-    response = self._client.send(
-               ^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpx/_client.py", line 914, in send
-    response = self._send_handling_auth(
-               ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpx/_client.py", line 942, in _send_handling_auth
-    response = self._send_handling_redirects(
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
-    response = self._send_single_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1014, in _send_single_request
-    response = transport.handle_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 250, in handle_request
-    resp = self._pool.handle_request(req)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 256, in handle_request
-    raise exc from None
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 236, in handle_request
-    response = connection.handle_request(
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 103, in handle_request
-    return self._connection.handle_request(request)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 136, in handle_request
-    raise exc
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 106, in handle_request
-    ) = self._receive_response_headers(**kwargs)
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 177, in _receive_response_headers
-    event = self._receive_event(timeout=timeout)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 217, in _receive_event
-    data = self._network_stream.read(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/httpcore/_backends/sync.py", line 128, in read
-    return self._sock.recv(max_bytes)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/ssl.py", line 1233, in recv
-    return self.read(buflen)
-           ^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/ssl.py", line 1106, in read
-    return self._sslobj.read(len)
-           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/groq/_base_client.py", line 1057, in request
+    self._sleep_for_retry(
+  File "/home/saad/datahub-agent/.venv/lib/python3.12/site-packages/groq/_base_client.py", line 1097, in _sleep_for_retry
+    time.sleep(timeout)
 KeyboardInterrupt

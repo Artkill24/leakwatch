@@ -1,18 +1,18 @@
 
 customer_churn_predictor: measuring 5 runs
-  run 1: inconclusive
-  run 2: leakage_detected
+  run 1: leakage_detected
+  run 2: inconclusive
   run 3: leakage_detected
   run 4: leakage_detected
-  run 5: leakage_detected
+  run 5: inconclusive
 
 MODEL customer_churn_predictor
-  verdicts:  {'inconclusive': 1, 'leakage_detected': 4}
+  verdicts:  {'leakage_detected': 3, 'inconclusive': 2}
   stable:    False
   wobbled:   6 field(s)
-      recency_days.direction: {'unstated': 2, 'backward': 3}
-      recency_days.anchor: {'reference_date': 4, 'unstated': 1}
-      recency_days.closes_before_scoring: {'unstated': 4, 'no': 1}
+      recency_days.direction: {'backward': 3, 'unstated': 2}
+      recency_days.closes_before_scoring: {'unstated': 3, 'no': 2}
       promo_response_rate.anchor: {'unstated': 2, 'reference_date': 3}
+      promo_response_rate.closes_before_scoring: {'yes': 1, 'unstated': 3, 'no': 1}
       post_cancellation_refund_total.closes_before_scoring: {'unstated': 4, 'no': 1}
-      post_cancellation_refund_total.mentions_target_column: {'no': 3, 'yes': 2}
+      post_cancellation_refund_total.mentions_target_column: {'yes': 1, 'no': 4}
