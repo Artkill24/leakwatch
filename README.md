@@ -40,7 +40,7 @@ seeded scenario are problematic, and different layers catch them:
 | feature | reads as | caught by | why |
 |---------|----------|-----------|-----|
 | `post_cancellation_refund_total` | openly unbounded | textual + temporal | states it aggregates over the full snapshot, and the label is defined on a column of that same table |
-| `fulfilment_exception_rate` | entirely clean | topological only | 90-day window, backward, anchored to the reference date, closed before scoring — but sourced from the raw table the label's column comes from |
+| `fulfilment_exception_rate` | entirely clean | topological only | 90-day window, backward, anchored to the reference date — but sourced from the raw table the label's column comes from |
 
 For the second, the extractor finds nothing wrong, correctly. The finding comes
 from the graph:
@@ -86,7 +86,8 @@ DataHub graph                    deterministic traversal, no LLM
                                             │
                                             ▼
                                      temporal.py
-                                       LLM extracts stated facts only
+                                       LLM extracts stated facts, 3× per model,
+                                       majority vote per field
                                        ├─ window_length
                                        ├─ direction     backward|forward|unstated
                                        ├─ anchor        reference_date|other|unstated
@@ -120,78 +121,79 @@ can be read and tested without an API key.
 Most submissions claim accuracy. This one measured it, and the measurements
 rejected two designs before the third held.
 
-### Attempt 1: judgement in a single prompt — rejected
+All figures below use `openai/gpt-oss-120b` at `temperature=0`, against the same
+two seeded models. The architecture is the only variable.
+
+### Baseline: judgement in a single prompt
 
 The obvious design asks the model for a verdict directly. Five identical runs
-against the clean control model, `temperature=0`:
+against the clean control model:
 
 | run | 1 | 2 | 3 | 4 | 5 |
 |-----|---|---|---|---|---|
-| verdict | inconclusive | clean | inconclusive | clean | inconclusive |
+| verdict | inconclusive | inconclusive | inconclusive | clean | clean |
 
-Three one way, two the other, on byte-identical input. Anything persisted from
-this is indefensible: re-run it during a review and the answer changes.
+Byte-identical input, two different answers. Anything persisted from this is
+indefensible: re-run it during a review and the catalog says something else.
 
-Model choice mattered but did not fix it — same prompt, same data:
+The same architecture on `llama-3.3-70b-versatile` was worse — it reported three
+**false positives** on the clean control, flagging features whose descriptions
+state retrospective windows. Model choice changes the error rate; it does not
+change the instability.
 
-| model | false positives on the clean control |
-|-------|--------------------------------------|
-| `llama-3.3-70b-versatile` | 3 |
-| `openai/gpt-oss-120b` | 0 |
+### First correction, still wrong — twice
 
-Better average quality. Same instability.
-
-### Attempt 2: extraction plus rules — still wrong, twice
-
-Moving the decision into code was necessary but not sufficient. Two rules were
-written so that a violation could fire on an *absence* of evidence:
+Moving the decision into code was necessary but not sufficient. Two rules let a
+violation fire on the *absence* of evidence:
 
 1. `mentions_target_column` asked the LLM whether a description referred to the
-   label's column. That is a judgement dressed as a fact, and it oscillated. On
-   one run in five it flipped to yes and turned a documentation gap into a leak
+   label's column. That is a judgement dressed as a fact, and it oscillated:
+   on one run in five it flipped to yes and turned a documentation gap into an
    accusation.
 2. Replacing it with a graph fact fixed that field, but the rule still read
    `closes_before_scoring != "yes"` — which includes `unstated`, the value the
    extractor produces when the text is silent. The clean control was flagged
-   `leakage_detected` with high confidence on one run in five.
+   `leakage_detected` with high confidence.
 
 Both are the same mistake in two places: **a violation resting on the absence of
 counter-evidence rather than on positive evidence.**
 
-### Attempt 3: violations require positive evidence
+Even after fixing that, a single misread sentence was enough. Over five runs,
+`promo_response_rate` — whose description explicitly states its window closes
+before the reference date — produced three different outcomes:
 
-A violation now fires only when the metadata *states* the boundary is crossed.
-Silence produces a gap.
+| run | 1 | 2 | 3 | 4 | 5 |
+|-----|---|---|---|---|---|
+| outcome | **violation** | clean | gap | gap | clean |
+
+One run in five read "closed before the reference date" as extending past it.
+
+### Adopted: extraction, majority vote, rules
+
+Each model is extracted three times and each field takes the majority value.
+Fields without a strict majority collapse to `unstated`, which degrades to a
+documentation gap rather than an accusation. Graph-derived fields are not voted
+on — they are identical every run by construction.
 
 | model | runs | verdicts |
 |-------|------|----------|
 | `customer_churn_predictor` | 5 | leakage_detected ×5 |
-| `demand_forecast` | 5 | inconclusive ×4, clean ×1 |
+| `demand_forecast` | 5 | inconclusive ×5 |
 
-The churn model is stable. The control model oscillates between two verdicts,
-**neither of which accuses anything** — which was the criterion that mattered.
-No verdict written to the catalog can now be a false accusation.
+Stable on both, with the planted leak found and the control never accused.
 
-The residual 4:1 has a known cause: the control's features say "trailing 90-day
-window" without stating where the window closes. Four times the extractor
-answers `unstated` and the audit reports a gap; once it infers `yes` and reports
-clean. `inconclusive` is the correct answer, and the fix is majority voting
-rather than another prompt revision.
+### What is still true
 
-### Where the wobble lives
+Extraction variance has not disappeared; it is absorbed. Individual fields still
+disagree between runs where the text is ambiguous, and that disagreement is
+itself the signal:
 
-| feature | description quality | extraction across 5 runs |
-|---------|--------------------|--------------------------|
-| `promo_response_rate` | window explicitly anchored and closed | identical every run |
-| `recency_days` | says "the feature computation date", never anchors it | 3 fields disagreed |
+**Where metadata is precise the extractor is deterministic; where it is vague it
+splits** — which is what a human reviewer does when reading the same sentence
+twice. Voting turns that split into a documentation gap instead of a coin flip.
 
-**Extraction variance measures the ambiguity of the text, not noise in the
-model.** Where metadata is precise the extractor is deterministic; where it is
-vague the extractor splits — which is what a human reviewer does when reading the
-same sentence twice.
-
-The topological layer is immune by construction: `reads_target_column_at_hop` is
-computed from the graph and returns the same value on every run.
+The topological layer is immune by construction: `reads_target_column_at_hop`
+comes from the graph and returns the same value on every run.
 
 ---
 
@@ -238,7 +240,8 @@ python temporal.py --model churn   # extract + decide
 python agent.py                    # audit and write verdicts back
 ```
 
-`--runs 5` on `temporal.py` reproduces the variance measurement above.
+`--runs 5` on `temporal.py` measures per-field extraction variance.
+`--votes N` sets the vote count (default 3; `1` disables voting).
 `--no-write` on `agent.py` analyses without touching the catalog.
 Sample outputs live in `examples/` for evaluation without running anything.
 
@@ -275,10 +278,13 @@ Readable without running anything, in order of precedence:
 allowed a violation on missing evidence, and both produced false accusations
 under extraction variance.
 
+The extraction prompt applies the same rule to itself. `closes_before_scoring`
+returns `yes` only when the text states where the window ends — a word like
+"trailing" describes direction, not an endpoint — and `no` only when the text
+states or explicitly denies a cutoff. Everything else is `unstated`.
+
 Gaps are not violations. A model whose metadata cannot be audited has a
-documentation problem, and reporting that as leakage would be a lie. Keeping the
-two apart mattered more than any prompt change: with only one output channel for
-"something is off", every uncertainty became an accusation.
+documentation problem, and reporting that as leakage would be a lie.
 
 ---
 
@@ -299,20 +305,16 @@ tags.
 - **Column-level precision is not expressible for features.**
   `MLFeatureProperties.sources` accepts dataset URNs only — the schema declares
   `entityTypes: ['dataset']`. A feature can state which tables it reads, not
-  which columns. Reading the label's *table* is therefore what the rules can
-  establish, never reading the label's column itself.
-- **The verdict is not yet fully deterministic.** The control model returns
-  `inconclusive` four times in five and `clean` once. Neither accuses, but a
-  reviewer re-running the audit can see a different word.
+  which columns. Reading the label's *table* is what the rules can establish,
+  never reading the label's column itself. This is why the topological layer
+  produces gaps, never violations.
+- **Three API calls per model per audit.** Voting trades cost for stability. A
+  fifty-model catalog is 150 calls per run.
 - **Ancestry is capped at six hops.** Deeper chains are truncated silently.
 - **Only what the catalog states.** A feature whose implementation contradicts
   its own documentation passes the textual layer. The tool audits declarations.
 - **Small evidence base.** Two models, six features, five runs per architecture.
   Enough to reject two designs in favour of a third; not a benchmark.
-
-The planned mitigation is majority voting across three extractions, with any
-field lacking consensus escalating to a documentation gap — turning measured
-variance into a signal about catalog quality rather than a defect to hide.
 
 ---
 
@@ -322,6 +324,6 @@ variance into a signal about catalog quality rather than a defect to hide.
 |------|------|
 | `context.py` | deterministic graph traversal, context assembly |
 | `lineage.py` | column-level ancestry of the label, cycle-safe |
-| `temporal.py` | structured extraction + rule engine + variance measurement |
+| `temporal.py` | extraction, majority voting, rule engine, variance measurement |
 | `agent.py` | end-to-end audit with write-back |
 | `seed_ml_metadata.py` | seeds the ML entities the datapack lacks |
