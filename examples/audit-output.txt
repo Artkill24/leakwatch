@@ -1,16 +1,24 @@
 MODEL customer_churn_predictor
   verdict: leakage_detected  (confidence: high)
-  1 feature(s) cross the prediction boundary stated by the label.
+  2 feature(s) cross the prediction boundary stated by the label.
 
   [!!] post_cancellation_refund_total
       rule: reads-target-column-past-scoring
       feature sources the label's own table and states a window reaching past the scoring point
 
-  documentation gaps (2)
+  [!!] fulfilment_exception_rate
+      rule: window-extends-past-scoring
+      window is stated to extend to or past the scoring point
+
+  documentation gaps (4)
       recency_days  [reads-target-table-no-cutoff-stated]
         -> sources the label's own table without stating where the window closes
-      fulfilment_exception_rate  [reads-table-carrying-target-column]
-        -> sources b2fd91.order_entry_db.analytics.order_details (as order_status, 1 hop); may read the label under another address regardless of what the description states
+      order_frequency_90d  [temporal-anchoring-undocumented]
+        -> description does not state: anchor
+      avg_basket_value  [temporal-anchoring-undocumented]
+        -> description does not state: anchor
+      promo_response_rate  [temporal-anchoring-undocumented]
+        -> description does not state: anchor
 
   recommendation: Restrict the flagged features to data available before the scoring date, then retrain.
 
@@ -25,8 +33,8 @@ MODEL demand_forecast
         -> sources the label's own table without stating where the window closes
       avg_basket_value  [reads-target-table-no-cutoff-stated]
         -> sources the label's own table without stating where the window closes
-      promo_response_rate  [temporal-anchoring-undocumented]
-        -> description does not state: anchor
+      promo_response_rate  [reads-target-table-no-cutoff-stated]
+        -> sources the label's own table without stating where the window closes
 
   recommendation: Document the anchoring and cutoff of the listed features so the audit can reach a verdict.
 

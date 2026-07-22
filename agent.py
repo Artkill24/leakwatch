@@ -38,9 +38,7 @@ from datahub.metadata.urns import TagUrn
 import datahub.metadata.schema_classes as sc
 
 from context import MLContextExtractor, ModelContext
-from temporal import extract, decide, verdict_for, Decision
-
-DEFAULT_LLM = "llama-3.3-70b-versatile"
+from temporal import extract_voted, decide, verdict_for, Decision, DEFAULT_LLM
 
 TAGS = {
     "ml-leakage-risk": (
@@ -92,10 +90,14 @@ class AuditResult:
 
 
 def audit(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
-          graph=None) -> AuditResult:
-    """Extract, then apply rules. The verdict never comes from the model."""
+          graph=None, votes: int = 3) -> AuditResult:
+    """Extract by majority vote, then apply rules.
+
+    The verdict never comes from the model, and no single misread sentence can
+    produce one: a field needs a strict majority across runs to count.
+    """
     try:
-        specs = extract(ctx, api_key, llm, graph)
+        specs = extract_voted(ctx, api_key, llm, graph, votes)
     except ImportError:
         return AuditResult(ctx.urn, ctx.name, "inconclusive", "low", "",
                            error="groq package not installed: pip install groq")
@@ -239,6 +241,8 @@ def main() -> int:
     ap.add_argument("--token", default=None)
     ap.add_argument("--model", default=None, help="filter by name substring")
     ap.add_argument("--llm", default=DEFAULT_LLM)
+    ap.add_argument("--votes", type=int, default=3,
+                    help="extractions to run per model; majority wins")
     ap.add_argument("--no-write", action="store_true",
                     help="analyse without modifying the catalog")
     ap.add_argument("--json", action="store_true")
@@ -274,7 +278,7 @@ def main() -> int:
         ctx = ex.extract(urn)
         if not ctx:
             continue
-        r = audit(ctx, api_key, args.llm, ex.graph)
+        r = audit(ctx, api_key, args.llm, ex.graph, args.votes)
         results.append(r)
         if emitter and not r.error:
             write_back(emitter, ex.graph, r)

@@ -71,10 +71,15 @@ a snapshot).
     "unstated" if the text does not say what the window is anchored to.
 
 closes_before_scoring
-    "yes" only if the text states the observation window closes before the \
-scoring point.
-    "no" if the text states or plainly entails that it extends to or past that \
-point.
+    "yes" only if the text explicitly states where the observation window ends,
+and that end precedes the scoring point. A word describing direction -- \
+"trailing", "preceding", "past" -- tells you which way the window runs, not \
+where it stops. "trailing 90-day window" does not state an endpoint, so it is \
+"unstated", not "yes".
+    "no" if the text states or plainly entails that the window extends to or \
+past that point. An explicit denial of a cutoff -- "rather than restricted to \
+the pre-scoring window", "over the full snapshot" -- is a statement, not an \
+inference, and counts.
     "unstated" otherwise.
 
 
@@ -205,6 +210,86 @@ def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
         specs.append(spec)
     return specs
 
+
+
+def extract_voted(
+    ctx: ModelContext,
+    api_key: str,
+    llm: str = DEFAULT_LLM,
+    graph=None,
+    votes: int = 3,
+) -> List[TemporalSpec]:
+    """Extract several times and keep the majority value for each field.
+
+    A single extraction can misread a sentence: on one run in five, a feature
+    whose description says its window "closed before the reference date" was
+    reported as closing after it, which fired a violation on a clean feature.
+
+    Fields without a strict majority collapse to "unstated", which degrades to a
+    documentation gap rather than an accusation. Disagreement between runs is
+    itself evidence that the text is ambiguous, so recording it as a gap is
+    honest rather than a fallback.
+
+    Graph-derived fields are not voted on: they are identical every run by
+    construction.
+    """
+    runs: List[List[TemporalSpec]] = []
+    errors: List[str] = []
+    for _ in range(votes):
+        try:
+            runs.append(extract(ctx, api_key, llm, graph))
+        except Exception as e:  # noqa: BLE001
+            # Swallowing this is how a rate limit turns into a mystery. Keep the
+            # message: a partial vote is usable, a silent total failure is not.
+            errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+            continue
+
+    if not runs:
+        raise RuntimeError(
+            "every extraction attempt failed; last error was "
+            + (errors[-1] if errors else "unknown")
+        )
+    if errors:
+        print(
+            f"  warning: {len(errors)}/{votes} extractions failed, "
+            f"voting on {len(runs)} ({errors[-1]})",
+            file=sys.stderr,
+        )
+    if len(runs) == 1:
+        return runs[0]
+
+    threshold = len(runs) // 2 + 1
+    voted: List[TemporalSpec] = []
+
+    for spec in runs[0]:
+        name = spec.feature
+        merged = TemporalSpec(feature=name)
+
+        for fld in EXTRACTION_FIELDS:
+            values = [
+                getattr(m, fld)
+                for r in runs
+                for m in r
+                if m.feature == name
+            ]
+            if not values:
+                continue
+            winner, count = Counter(values).most_common(1)[0]
+            setattr(merged, fld, winner if count >= threshold else "unstated")
+
+        # graph fields: deterministic, copy from any run that has them
+        for r in runs:
+            match = next((m for m in r if m.feature == name), None)
+            if match is None:
+                continue
+            merged.reads_target_column_at_hop = match.reads_target_column_at_hop
+            merged.reads_target_ancestor = match.reads_target_ancestor
+            merged.shares_target_table = match.shares_target_table
+            break
+
+        voted.append(merged)
+
+    return voted
 
 # ---------------------------------------------------------------------------
 # Decision -- no model involved past this line
@@ -341,6 +426,8 @@ def main() -> int:
     ap.add_argument("--gms", default="http://localhost:8080")
     ap.add_argument("--model", default=None)
     ap.add_argument("--llm", default=DEFAULT_LLM)
+    ap.add_argument("--votes", type=int, default=1,
+                    help="extractions per verdict; majority wins (1 = no voting)")
     ap.add_argument("--runs", type=int, default=1,
                     help="run extraction N times and report variance")
     ap.add_argument("--json", action="store_true")
@@ -388,7 +475,9 @@ def main() -> int:
                     print("  wobbled:   nothing -- extraction was identical every run")
             continue
 
-        specs = extract(ctx, api_key, args.llm, ex.graph)
+        specs = (extract_voted(ctx, api_key, args.llm, ex.graph, args.votes)
+                 if args.votes > 1
+                 else extract(ctx, api_key, args.llm, ex.graph))
         decisions = [decide(s) for s in specs]
         print(f"\nMODEL {ctx.name}")
         print(f"  verdict: {verdict_for(decisions)}")
