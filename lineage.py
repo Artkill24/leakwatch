@@ -119,6 +119,39 @@ def tables_carrying_target(
     return out
 
 
+def target_column_in_tables(
+    graph, target_table_urn: str, column: str, candidate_tables: set
+) -> Dict[str, int]:
+    """For each candidate table, at what hop does it carry the target column?
+
+    hop 0 means the candidate *is* the target's table -- the feature reads the
+    label column directly. Higher hops mean it reads the column further upstream.
+    Returns only tables that carry it; absent tables don't.
+
+    This replaces asking the LLM "does this mention the target column", which was
+    a judgement dressed as a fact and oscillated between runs. Table membership
+    is a graph property and returns the same answer every time.
+    """
+    out: Dict[str, int] = {}
+    target_short = target_table_urn.split(",")[1] if "," in target_table_urn else target_table_urn
+
+    # hop 0: the target's own table
+    for cand in candidate_tables:
+        cand_short = cand.split(",")[1] if "," in cand else cand
+        if cand_short.lower() == target_short.lower():
+            out[cand] = 0
+
+    # hop >=1: ancestors carrying the column
+    for ds, (col, depth) in tables_carrying_target(graph, target_table_urn, column).items():
+        ds_short = ds.split(",")[1] if "," in ds else ds
+        for cand in candidate_tables:
+            cand_short = cand.split(",")[1] if "," in cand else cand
+            if cand_short.lower() == ds_short.lower():
+                if cand not in out or depth < out[cand]:
+                    out[cand] = depth
+    return out
+
+
 def _platform(dataset_urn: str) -> str:
     try:
         return dataset_urn.split("dataPlatform:")[1].split(",")[0]

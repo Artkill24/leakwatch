@@ -31,7 +31,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional
 
 from context import MLContextExtractor, ModelContext
-from lineage import tables_carrying_target
+from lineage import tables_carrying_target, target_column_in_tables
 
 DEFAULT_LLM = "openai/gpt-oss-120b"
 
@@ -42,7 +42,6 @@ EXTRACTION_FIELDS = [
     "direction",
     "anchor",
     "closes_before_scoring",
-    "mentions_target_column",
 ]
 
 EXTRACT_PROMPT = """\
@@ -78,10 +77,6 @@ scoring point.
 point.
     "unstated" otherwise.
 
-mentions_target_column
-    "yes" if the description refers to the label column by name or by an \
-unmistakable description of it.
-    "no" otherwise.
 
 Rules:
 
@@ -99,8 +94,7 @@ Return only JSON, no prose, no markdown fences:
       "window_length": "90d" | null,
       "direction": "backward" | "forward" | "unstated",
       "anchor": "reference_date" | "other" | "unstated",
-      "closes_before_scoring": "yes" | "no" | "unstated",
-      "mentions_target_column": "yes" | "no"
+      "closes_before_scoring": "yes" | "no" | "unstated"
     }
   ]
 }\
@@ -114,8 +108,8 @@ class TemporalSpec:
     direction: str = "unstated"
     anchor: str = "unstated"
     closes_before_scoring: str = "unstated"
-    mentions_target_column: str = "no"
-    # filled in by Python, not by the model
+    # all three below are filled in by Python from the graph, never by the model
+    reads_target_column_at_hop: Optional[int] = None  # 0 = directly reads label col
     shares_target_table: bool = False
     reads_target_ancestor: Optional[str] = None  # "table (as column, N hop)"
 
@@ -165,25 +159,21 @@ def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
     )
     data = json.loads(resp.choices[0].message.content)
 
-    # Column ancestry of the label, resolved in the graph. A feature sourcing a
-    # table that carries the target column under any name is reading the label,
-    # whatever its description says.
-    ancestor_tables = {}
+    # Whether a feature reads the label column is a graph property, not a reading
+    # of prose. hop 0 means it reads the target's own table directly (violation);
+    # hop >=1 means it reads a table carrying the column further upstream (gap).
+    # This used to be an LLM field, mentions_target_column, which oscillated
+    # between runs and turned an occasional false "yes" into a false accusation.
+    label_urn = None
     if label_table and label_column != "(not documented)":
         label_urn = next(
             (s.urn for f in ctx.features for s in f.sources if s.name == label_table),
             None,
         )
-        if label_urn and graph is not None:
-            try:
-                ancestor_tables = tables_carrying_target(graph, label_urn, label_column)
-            except Exception:  # noqa: BLE001
-                ancestor_tables = {}
 
-    # Python decides table overlap; the model never sees URNs.
-    sources_by_feature = {
-        f.name: {s.name for s in f.sources} for f in ctx.features
-    }
+    # sources per feature, as dataset URNs (not short names -- those collide)
+    source_urns = {f.name: {s.urn for s in f.sources} for f in ctx.features}
+    source_names = {f.name: {s.name for s in f.sources} for f in ctx.features}
 
     specs = []
     for row in data.get("features", []):
@@ -194,16 +184,24 @@ def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
             direction=row.get("direction", "unstated"),
             anchor=row.get("anchor", "unstated"),
             closes_before_scoring=row.get("closes_before_scoring", "unstated"),
-            mentions_target_column=row.get("mentions_target_column", "no"),
         )
         if label_table:
-            spec.shares_target_table = label_table in sources_by_feature.get(name, set())
-        if ancestor_tables:
-            for src_short in sources_by_feature.get(name, set()):
-                for anc_urn, (anc_col, hops) in ancestor_tables.items():
-                    if src_short and src_short in anc_urn:
-                        spec.reads_target_ancestor = f"{src_short} (as {anc_col}, {hops} hop)"
-                        break
+            spec.shares_target_table = label_table in source_names.get(name, set())
+
+        if label_urn and graph is not None:
+            try:
+                carrying = target_column_in_tables(
+                    graph, label_urn, label_column, source_urns.get(name, set())
+                )
+            except Exception:  # noqa: BLE001
+                carrying = {}
+            if carrying:
+                hop = min(carrying.values())
+                spec.reads_target_column_at_hop = hop
+                if hop >= 1:
+                    anc = min(carrying.items(), key=lambda x: x[1])[0]
+                    short = anc.split(",")[1] if "," in anc else anc
+                    spec.reads_target_ancestor = f"{short} (as {label_column}, {hop} hop)"
         specs.append(spec)
     return specs
 
@@ -216,10 +214,10 @@ def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
 def decide(spec: TemporalSpec) -> Decision:
     """Apply the rules in order of severity. First match wins."""
 
-    if spec.mentions_target_column == "yes" and spec.closes_before_scoring != "yes":
+    if spec.reads_target_column_at_hop == 0 and spec.closes_before_scoring != "yes":
         return Decision(
-            spec.feature, "violation", "reads-target-without-cutoff",
-            "feature reads the label column and does not state a cutoff before scoring",
+            spec.feature, "violation", "reads-target-column-without-cutoff",
+            "feature sources the label's own table and states no cutoff before scoring",
         )
 
     if spec.direction == "forward" and spec.anchor == "reference_date":
@@ -389,7 +387,7 @@ def main() -> int:
             print(f"\n  {mark} {s.feature}")
             print(f"      window={s.window_length} dir={s.direction} "
                   f"anchor={s.anchor} closes={s.closes_before_scoring} "
-                  f"target_col={s.mentions_target_column} "
+                  f"target_hop={s.reads_target_column_at_hop} "
                   f"same_table={s.shares_target_table}")
             if s.reads_target_ancestor:
                 print(f"      ancestor: {s.reads_target_ancestor}")
