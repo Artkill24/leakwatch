@@ -1,16 +1,14 @@
 MODEL customer_churn_predictor
   verdict: leakage_detected  (confidence: high)
-  2 feature(s) cross the prediction boundary stated by the label.
-
-  [!!] recency_days
-      rule: reads-target-column-without-cutoff
-      feature sources the label's own table and states no cutoff before scoring
+  1 feature(s) cross the prediction boundary stated by the label.
 
   [!!] post_cancellation_refund_total
-      rule: reads-target-column-without-cutoff
-      feature sources the label's own table and states no cutoff before scoring
+      rule: reads-target-column-past-scoring
+      feature sources the label's own table and states a window reaching past the scoring point
 
-  documentation gaps (1)
+  documentation gaps (2)
+      recency_days  [reads-target-table-no-cutoff-stated]
+        -> sources the label's own table without stating where the window closes
       fulfilment_exception_rate  [reads-table-carrying-target-column]
         -> sources b2fd91.order_entry_db.analytics.order_details (as order_status, 1 hop); may read the label under another address regardless of what the description states
 
@@ -19,10 +17,18 @@ MODEL customer_churn_predictor
 ----------------------------------------------------------------------
 
 MODEL demand_forecast
-  verdict: clean  (confidence: medium)
-  All features state temporal boundaries consistent with the label.
+  verdict: inconclusive  (confidence: medium)
+  No violation proven, but 3 feature(s) lack the metadata needed to verify temporal safety.
 
-  recommendation: No action required.
+  documentation gaps (3)
+      order_frequency_90d  [reads-target-table-no-cutoff-stated]
+        -> sources the label's own table without stating where the window closes
+      avg_basket_value  [reads-target-table-no-cutoff-stated]
+        -> sources the label's own table without stating where the window closes
+      promo_response_rate  [temporal-anchoring-undocumented]
+        -> description does not state: anchor
+
+  recommendation: Document the anchoring and cutoff of the listed features so the audit can reach a verdict.
 
 ----------------------------------------------------------------------
 

@@ -4,8 +4,8 @@ Audits deployed ML models for **target leakage** using catalog metadata alone �
 no access to training data, no model artifacts, no code.
 
 It reads what a model's features claim to do, checks those claims against the
-temporal boundary the label imposes, and then walks column-level lineage to find
-the cases where the claims are honest and the problem lies elsewhere.
+temporal boundary the label imposes, and walks column-level lineage to catch the
+cases where the claims are honest and the problem lies elsewhere.
 
 ---
 
@@ -42,8 +42,8 @@ seeded scenario are problematic, and different layers catch them:
 | `post_cancellation_refund_total` | openly unbounded | textual + temporal | states it aggregates over the full snapshot, and the label is defined on a column of that same table |
 | `fulfilment_exception_rate` | entirely clean | topological only | 90-day window, backward, anchored to the reference date, closed before scoring — but sourced from the raw table the label's column comes from |
 
-For the second, the extractor reports `target_col=no`. The model read the
-description and found nothing, correctly. The finding comes from the graph:
+For the second, the extractor finds nothing wrong, correctly. The finding comes
+from the graph:
 
 ```
 fulfilment_exception_rate ──sources──► analytics.order_details
@@ -70,9 +70,7 @@ Resolving the ancestry of `order_history.order_status` returns:
 
 The same logical table appears once per platform: a dbt model and the warehouse
 table it produces are distinct catalog entities, and both genuinely carry the
-column. A single traversal therefore spans the transformation layer and the
-warehouse — which is the difference between using a catalog and reading a schema
-dump.
+column. A single traversal spans the transformation layer and the warehouse.
 
 ---
 
@@ -90,12 +88,12 @@ DataHub graph                    deterministic traversal, no LLM
                                      temporal.py
                                        LLM extracts stated facts only
                                        ├─ window_length
-                                       ├─ direction       backward|forward|unstated
-                                       ├─ anchor          reference_date|other|unstated
-                                       ├─ closes_before_scoring
-                                       └─ mentions_target_column
+                                       ├─ direction     backward|forward|unstated
+                                       ├─ anchor        reference_date|other|unstated
+                                       └─ closes_before_scoring
                                             +
-                                       reads_target_ancestor  ← from the graph
+                                       reads_target_column_at_hop  ← from the graph
+                                       reads_target_ancestor       ← from the graph
                                             │
                                             ▼
                                      rules in Python
@@ -119,10 +117,10 @@ can be read and tested without an API key.
 
 ## Reliability
 
-Most submissions claim accuracy. This one measured it, and the first
-architecture failed.
+Most submissions claim accuracy. This one measured it, and the measurements
+rejected two designs before the third held.
 
-### Judgement in a single prompt — rejected
+### Attempt 1: judgement in a single prompt — rejected
 
 The obvious design asks the model for a verdict directly. Five identical runs
 against the clean control model, `temperature=0`:
@@ -143,28 +141,44 @@ Model choice mattered but did not fix it — same prompt, same data:
 
 Better average quality. Same instability.
 
-### Extraction plus rules — adopted
+### Attempt 2: extraction plus rules — still wrong, twice
+
+Moving the decision into code was necessary but not sufficient. Two rules were
+written so that a violation could fire on an *absence* of evidence:
+
+1. `mentions_target_column` asked the LLM whether a description referred to the
+   label's column. That is a judgement dressed as a fact, and it oscillated. On
+   one run in five it flipped to yes and turned a documentation gap into a leak
+   accusation.
+2. Replacing it with a graph fact fixed that field, but the rule still read
+   `closes_before_scoring != "yes"` — which includes `unstated`, the value the
+   extractor produces when the text is silent. The clean control was flagged
+   `leakage_detected` with high confidence on one run in five.
+
+Both are the same mistake in two places: **a violation resting on the absence of
+counter-evidence rather than on positive evidence.**
+
+### Attempt 3: violations require positive evidence
+
+A violation now fires only when the metadata *states* the boundary is crossed.
+Silence produces a gap.
 
 | model | runs | verdicts |
 |-------|------|----------|
 | `customer_churn_predictor` | 5 | leakage_detected ×5 |
-| `demand_forecast` | 5 | inconclusive ×5 |
+| `demand_forecast` | 5 | inconclusive ×4, clean ×1 |
 
-Stable on both.
+The churn model is stable. The control model oscillates between two verdicts,
+**neither of which accuses anything** — which was the criterion that mattered.
+No verdict written to the catalog can now be a false accusation.
 
-### Why it holds, and where it doesn't
+The residual 4:1 has a known cause: the control's features say "trailing 90-day
+window" without stating where the window closes. Four times the extractor
+answers `unstated` and the audit reports a gap; once it infers `yes` and reports
+clean. `inconclusive` is the correct answer, and the fix is majority voting
+rather than another prompt revision.
 
-Five extraction fields still wobbled between runs on the churn model — yet the
-verdict did not move. The rules are redundant: three of the four observed field
-combinations trigger a violation by one path or another. That is a real property,
-not luck, and also not a guarantee: a fourth combination exists that did not
-occur in five runs and would change the outcome.
-
-The topological layer is immune to this by construction. `reads_target_ancestor`
-is computed from the graph, so it returns the same value on every run regardless
-of how the model reads a sentence that day.
-
-The more useful finding is *where* the wobble lives:
+### Where the wobble lives
 
 | feature | description quality | extraction across 5 runs |
 |---------|--------------------|--------------------------|
@@ -175,6 +189,9 @@ The more useful finding is *where* the wobble lives:
 model.** Where metadata is precise the extractor is deterministic; where it is
 vague the extractor splits — which is what a human reviewer does when reading the
 same sentence twice.
+
+The topological layer is immune by construction: `reads_target_column_at_hop` is
+computed from the graph and returns the same value on every run.
 
 ---
 
@@ -244,16 +261,22 @@ Readable without running anything, in order of precedence:
 
 | rule | condition | outcome |
 |------|-----------|---------|
-| `reads-target-without-cutoff` | feature reads the label column, no stated cutoff | violation |
+| `reads-target-column-past-scoring` | sources the label's own table **and** states a window reaching past scoring | violation |
 | `forward-from-reference` | window runs forward from the reference date | violation |
 | `window-extends-past-scoring` | window stated to reach past the scoring point | violation |
+| `reads-target-table-no-cutoff-stated` | sources the label's own table, cutoff not stated | gap |
 | `temporal-anchoring-undocumented` | direction or anchor not stated | gap |
-| `reads-table-carrying-target-column` | sources a table carrying the label's column, at any hop | gap |
-| `shares-target-table-no-cutoff-stated` | sources the label's table, no cutoff stated | gap |
+| `reads-table-carrying-target-column` | sources a table carrying the label's column upstream | gap |
+| `shares-target-table-no-cutoff-stated` | shares the label's table, no cutoff stated | gap |
 | — | nothing fired | clean |
 
-Gaps are not violations. A model whose metadata cannot be audited is a
-documentation problem, and reporting it as leakage would be a lie. Keeping the
+**Every violation requires the metadata to state the problem.** None fires on
+`unstated`. This is not a style preference: two earlier versions of these rules
+allowed a violation on missing evidence, and both produced false accusations
+under extraction variance.
+
+Gaps are not violations. A model whose metadata cannot be audited has a
+documentation problem, and reporting that as leakage would be a lie. Keeping the
 two apart mattered more than any prompt change: with only one output channel for
 "something is off", every uncertainty became an accusation.
 
@@ -276,19 +299,20 @@ tags.
 - **Column-level precision is not expressible for features.**
   `MLFeatureProperties.sources` accepts dataset URNs only — the schema declares
   `entityTypes: ['dataset']`. A feature can state which tables it reads, not
-  which columns. The topological layer therefore returns *gap*, never
-  *violation*: it can show that a feature reads a table carrying the label's
-  column, not that it reads that column.
+  which columns. Reading the label's *table* is therefore what the rules can
+  establish, never reading the label's column itself.
+- **The verdict is not yet fully deterministic.** The control model returns
+  `inconclusive` four times in five and `clean` once. Neither accuses, but a
+  reviewer re-running the audit can see a different word.
 - **Ancestry is capped at six hops.** Deeper chains are truncated silently.
 - **Only what the catalog states.** A feature whose implementation contradicts
   its own documentation passes the textual layer. The tool audits declarations.
-- **Small evidence base.** Two models, six features, five runs each. Enough to
-  reject one architecture in favour of another; not a benchmark.
+- **Small evidence base.** Two models, six features, five runs per architecture.
+  Enough to reject two designs in favour of a third; not a benchmark.
 
-The planned mitigation for extraction variance is majority voting across three
-runs, with any field lacking consensus escalating to a documentation gap — which
-turns measured variance into a signal about catalog quality rather than a defect
-to hide.
+The planned mitigation is majority voting across three extractions, with any
+field lacking consensus escalating to a documentation gap — turning measured
+variance into a signal about catalog quality rather than a defect to hide.
 
 ---
 

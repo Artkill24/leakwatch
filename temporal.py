@@ -214,10 +214,14 @@ def extract(ctx: ModelContext, api_key: str, llm: str = DEFAULT_LLM,
 def decide(spec: TemporalSpec) -> Decision:
     """Apply the rules in order of severity. First match wins."""
 
-    if spec.reads_target_column_at_hop == 0 and spec.closes_before_scoring != "yes":
+    # Violations require positive evidence. "unstated" means the metadata is
+    # silent, and silence is a documentation gap -- treating it as proof is how
+    # an uncertain extraction turns into a false accusation.
+    if spec.reads_target_column_at_hop == 0 and spec.closes_before_scoring == "no":
         return Decision(
-            spec.feature, "violation", "reads-target-column-without-cutoff",
-            "feature sources the label's own table and states no cutoff before scoring",
+            spec.feature, "violation", "reads-target-column-past-scoring",
+            "feature sources the label's own table and states a window reaching "
+            "past the scoring point",
         )
 
     if spec.direction == "forward" and spec.anchor == "reference_date":
@@ -230,6 +234,12 @@ def decide(spec: TemporalSpec) -> Decision:
         return Decision(
             spec.feature, "violation", "window-extends-past-scoring",
             "window is stated to extend to or past the scoring point",
+        )
+
+    if spec.reads_target_column_at_hop == 0 and spec.closes_before_scoring != "yes":
+        return Decision(
+            spec.feature, "gap", "reads-target-table-no-cutoff-stated",
+            "sources the label's own table without stating where the window closes",
         )
 
     if spec.direction == "unstated" or spec.anchor == "unstated":
